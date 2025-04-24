@@ -26,6 +26,10 @@ async function handleVideoDownload({ videoData, quality, title }) {
       throw new Error('No manifest URL found');
     }
 
+    // Get the base URL for segment downloads
+    const baseUrl = videoData.manifestUrl.substring(0, videoData.manifestUrl.lastIndexOf('/') + 1);
+    console.log('Base URL:', baseUrl);
+
     // Headers required for RÚV's CDN
     const headers = {
       'Origin': 'https://www.ruv.is',
@@ -36,8 +40,7 @@ async function handleVideoDownload({ videoData, quality, title }) {
       'Sec-Fetch-Dest': 'empty',
       'Sec-Fetch-Mode': 'cors',
       'Sec-Fetch-Site': 'cross-site',
-      'Connection': 'keep-alive',
-      'Authorization': `Bearer ${await getAuthToken()}`
+      'Connection': 'keep-alive'
     };
 
     // Try to fetch the master playlist
@@ -49,13 +52,12 @@ async function handleVideoDownload({ videoData, quality, title }) {
     // If original URL fails, try quality variants
     if (!masterResponse.ok) {
       console.log('Original manifest URL failed, trying quality variants...');
-      const videoId = videoData.manifestUrl.match(/\/([^\/]+)\/master\.m3u8$/)?.[1] ||
-                     videoData.manifestUrl.match(/\/([^\/]+)$/)?.[1];
+      const videoId = videoData.manifestUrl.match(/\/([^\/]+)\/[^\/]+\.m3u8$/)?.[1];
       
       if (videoId) {
         // Try to get stream URL from API first
         try {
-          const apiResponse = await fetch(`https://www.ruv.is/api/manual/programs/${videoId}`, {
+          const apiResponse = await fetch(`https://www.ruv.is/api/programs/${videoId}`, {
             headers: {
               'Accept': 'application/json',
               'Origin': 'https://www.ruv.is',
@@ -152,8 +154,9 @@ async function handleVideoDownload({ videoData, quality, title }) {
       progress: 0
     });
 
-    const segmentData = [];
-    let downloadedSize = 0;
+    // Create a collection of Uint8Array chunks
+    const segmentChunks = [];
+    let totalSize = 0;
 
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
@@ -168,8 +171,8 @@ async function handleVideoDownload({ videoData, quality, title }) {
       }
 
       const buffer = await response.arrayBuffer();
-      segmentData.push(buffer);
-      downloadedSize += buffer.byteLength;
+      segmentChunks.push(new Uint8Array(buffer));
+      totalSize += buffer.byteLength;
 
       // Update progress
       const progress = Math.round((i + 1) / segments.length * 100);
@@ -179,25 +182,49 @@ async function handleVideoDownload({ videoData, quality, title }) {
       });
     }
 
-    // Concatenate all segments
-    const concatenated = new Blob(segmentData, { type: 'video/mp2t' });
-    const url = URL.createObjectURL(concatenated);
+    // Create final buffer and combine all chunks
+    const finalBuffer = new Uint8Array(totalSize);
+    let offset = 0;
+    for (const chunk of segmentChunks) {
+      finalBuffer.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
 
-    // Download the concatenated file
-    await chrome.downloads.download({
-      url: url,
-      filename: `${cleanTitle}.ts`,
-      saveAs: true
-    });
+    // Start the download using chrome.downloads API directly with the raw data
+    const blob = new Blob([finalBuffer], { type: 'video/mp2t' });
+    const reader = new FileReader();
+    
+    reader.onload = async () => {
+      try {
+        await chrome.downloads.download({
+          url: reader.result,
+          filename: `${cleanTitle}.ts`,
+          saveAs: true
+        });
 
-    // Cleanup
-    URL.revokeObjectURL(url);
+        // Send completion message
+        chrome.runtime.sendMessage({
+          action: 'downloadComplete',
+          folderName: cleanTitle
+        });
+      } catch (error) {
+        console.error('Download error:', error);
+        chrome.runtime.sendMessage({
+          action: 'downloadError',
+          error: error.message
+        });
+      }
+    };
 
-    // Send completion message
-    chrome.runtime.sendMessage({
-      action: 'downloadComplete',
-      folderName: cleanTitle
-    });
+    reader.onerror = () => {
+      chrome.runtime.sendMessage({
+        action: 'downloadError',
+        error: 'Failed to process video data'
+      });
+    };
+
+    // Start reading the blob as data URL
+    reader.readAsDataURL(blob);
 
   } catch (error) {
     console.error('Download error:', error);
