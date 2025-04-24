@@ -141,37 +141,25 @@ async function handleVideoDownload({ videoData, quality, title }) {
     // Create a clean filename
     const cleanTitle = (title || 'video').replace(/[/\\?%*:|"<>]/g, '-');
     
-    // Calculate total duration
-    const totalDuration = segments.reduce((acc, seg) => acc + seg.duration, 0);
-    const totalMinutes = Math.round(totalDuration / 60);
-
     // Get the base URL for segment downloads
     const segmentBaseUrl = variantUrl.substring(0, variantUrl.lastIndexOf('/') + 1);
 
-    // Fetch all segments
-    chrome.runtime.sendMessage({
-      action: 'downloadProgress',
-      progress: 0
-    });
-
-    // Create a collection of Uint8Array chunks
-    const segmentChunks = [];
+    // Create a shared buffer to store all segment data
     let totalSize = 0;
+    const segmentData = [];
 
+    // Download all segments
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
       const segmentUrl = segmentBaseUrl + segment.uri;
       
-      const response = await fetch(segmentUrl, { 
-        headers,
-        credentials: 'omit'
-      });
+      const response = await fetch(segmentUrl, { headers, credentials: 'omit' });
       if (!response.ok) {
         throw new Error(`Failed to fetch segment ${i}: ${response.status}`);
       }
 
       const buffer = await response.arrayBuffer();
-      segmentChunks.push(new Uint8Array(buffer));
+      segmentData.push(new Uint8Array(buffer));
       totalSize += buffer.byteLength;
 
       // Update progress
@@ -182,49 +170,35 @@ async function handleVideoDownload({ videoData, quality, title }) {
       });
     }
 
-    // Create final buffer and combine all chunks
+    // Create the final buffer and combine all segments
     const finalBuffer = new Uint8Array(totalSize);
     let offset = 0;
-    for (const chunk of segmentChunks) {
+    for (const chunk of segmentData) {
       finalBuffer.set(chunk, offset);
       offset += chunk.byteLength;
     }
 
-    // Start the download using chrome.downloads API directly with the raw data
+    // Create a new blob with all data
     const blob = new Blob([finalBuffer], { type: 'video/mp2t' });
-    const reader = new FileReader();
-    
-    reader.onload = async () => {
-      try {
-        await chrome.downloads.download({
-          url: reader.result,
-          filename: `${cleanTitle}.ts`,
-          saveAs: true
-        });
+    console.log('Final blob size:', blob.size);
 
-        // Send completion message
-        chrome.runtime.sendMessage({
-          action: 'downloadComplete',
-          folderName: cleanTitle
-        });
-      } catch (error) {
-        console.error('Download error:', error);
-        chrome.runtime.sendMessage({
-          action: 'downloadError',
-          error: error.message
-        });
-      }
-    };
+    // Create a download URL and trigger download
+    const downloadUrl = URL.createObjectURL(blob);
 
-    reader.onerror = () => {
-      chrome.runtime.sendMessage({
-        action: 'downloadError',
-        error: 'Failed to process video data'
-      });
-    };
+    await chrome.downloads.download({
+      url: downloadUrl,
+      filename: `${cleanTitle}.ts`,
+      saveAs: true
+    });
 
-    // Start reading the blob as data URL
-    reader.readAsDataURL(blob);
+    // Clean up the URL
+    URL.revokeObjectURL(downloadUrl);
+
+    // Send completion message
+    chrome.runtime.sendMessage({
+      action: 'downloadComplete',
+      folderName: cleanTitle
+    });
 
   } catch (error) {
     console.error('Download error:', error);
