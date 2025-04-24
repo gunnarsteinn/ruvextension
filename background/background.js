@@ -37,44 +37,12 @@ async function handleVideoDownload({ videoData, quality, title }) {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
     };
 
-    // Try different URL patterns if the original fails
-    let masterResponse = await fetch(videoData.manifestUrl, {
-      headers: headers
-    });
-    
+    let masterResponse = await fetch(videoData.manifestUrl, { headers });
     if (!masterResponse.ok) {
-      console.log(`First attempt failed with status ${masterResponse.status}, trying alternative URLs...`);
-      
-      // Try alternative URL patterns
-      const videoId = videoData.manifestUrl.split('/')[3];
-      const alternativeUrls = [
-        `https://ruv-vod.akamaized.net/${videoId}/master.m3u8`,
-        `https://vod.ruv.is/${videoId}/master.m3u8`,
-        `https://ruv-vod.akamaized.net/TV/${videoId}/master.m3u8`,
-        `https://ruv-vod.akamaized.net/krakkaruv/${videoId}/master.m3u8`
-      ];
-
-      for (const url of alternativeUrls) {
-        console.log('Trying alternative URL:', url);
-        masterResponse = await fetch(url, {
-          headers: headers
-        });
-        if (masterResponse.ok) {
-          console.log('Successfully found working URL:', url);
-          videoData.manifestUrl = url;
-          break;
-        }
-      }
-
-      if (!masterResponse.ok) {
-        throw new Error(`Failed to fetch master playlist: ${masterResponse.status} (tried multiple URL patterns)`);
-      }
+      throw new Error(`Failed to fetch master playlist: ${masterResponse.status}`);
     }
 
     const masterPlaylist = await masterResponse.text();
-    console.log('Master playlist:', masterPlaylist);
-
-    // Get the best quality variant URL
     const variantUrl = await getBestQualityVariant(masterPlaylist, baseUrl, quality);
     if (!variantUrl) {
       throw new Error('No suitable quality variant found');
@@ -83,15 +51,12 @@ async function handleVideoDownload({ videoData, quality, title }) {
     console.log('Selected variant URL:', variantUrl);
 
     // Fetch the variant playlist
-    const variantResponse = await fetch(variantUrl);
+    const variantResponse = await fetch(variantUrl, { headers });
     if (!variantResponse.ok) {
       throw new Error(`Failed to fetch variant playlist: ${variantResponse.status}`);
     }
 
     const variantPlaylist = await variantResponse.text();
-    console.log('Variant playlist:', variantPlaylist);
-
-    // Parse segments
     const segments = parseM3U8Segments(variantPlaylist);
     console.log(`Found ${segments.length} segments`);
 
@@ -101,72 +66,58 @@ async function handleVideoDownload({ videoData, quality, title }) {
     // Calculate total duration
     const totalDuration = segments.reduce((acc, seg) => acc + seg.duration, 0);
     const totalMinutes = Math.round(totalDuration / 60);
-    
-    // Create downloads folder name with quality and duration
-    const folderName = `${cleanTitle} (${quality} - ${totalMinutes}min)`;
 
     // Get the base URL for segment downloads
     const segmentBaseUrl = variantUrl.substring(0, variantUrl.lastIndexOf('/') + 1);
 
-    // Create batch downloads for segments
-    const batchSize = 10; // Download 10 segments at a time
-    const batches = [];
-    
-    for (let i = 0; i < segments.length; i += batchSize) {
-      const batch = segments.slice(i, i + batchSize);
-      batches.push(batch);
-    }
-
-    // Create README content
-    const readmeText = [
-      `This folder contains video segments from "${cleanTitle}"`,
-      `Total duration: ${totalMinutes} minutes`,
-      `Quality: ${quality}`,
-      ``,
-      `To combine the segments, you can use:`,
-      `1. VLC Media Player: Add all .ts files to a playlist`,
-      `2. ffmpeg command: ffmpeg -i "concat:segment*.ts" -c copy "${cleanTitle}.mp4"`
-    ].join('\n');
-
-    // Create data URL for README
-    const readmeDataUrl = 'data:text/plain;base64,' + btoa(unescape(encodeURIComponent(readmeText)));
-
-    // Download README file
-    await chrome.downloads.download({
-      url: readmeDataUrl,
-      filename: `${folderName}/README.txt`,
-      saveAs: false
+    // Fetch all segments
+    chrome.runtime.sendMessage({
+      action: 'downloadProgress',
+      progress: 0
     });
 
-    // Download segments in batches
-    console.log(`Starting download of ${batches.length} batches...`);
+    const segmentData = [];
+    let downloadedSize = 0;
 
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      await Promise.all(batch.map((segment, index) => {
-        const segmentUrl = segmentBaseUrl + segment.uri;
-        const segmentIndex = i * batchSize + index;
-        const paddedIndex = segmentIndex.toString().padStart(4, '0');
-        
-        return chrome.downloads.download({
-          url: segmentUrl,
-          filename: `${folderName}/segment${paddedIndex}.ts`,
-          saveAs: false
-        });
-      }));
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+      const segmentUrl = segmentBaseUrl + segment.uri;
+      
+      const response = await fetch(segmentUrl, { headers });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch segment ${i}: ${response.status}`);
+      }
+
+      const buffer = await response.arrayBuffer();
+      segmentData.push(buffer);
+      downloadedSize += buffer.byteLength;
 
       // Update progress
-      const progress = Math.round(((i + 1) * batchSize / segments.length) * 100);
+      const progress = Math.round((i + 1) / segments.length * 100);
       chrome.runtime.sendMessage({
         action: 'downloadProgress',
-        progress: Math.min(progress, 100)
+        progress: progress
       });
     }
+
+    // Concatenate all segments
+    const concatenated = new Blob(segmentData, { type: 'video/mp2t' });
+    const url = URL.createObjectURL(concatenated);
+
+    // Download the concatenated file
+    await chrome.downloads.download({
+      url: url,
+      filename: `${cleanTitle}.ts`,
+      saveAs: true
+    });
+
+    // Cleanup
+    URL.revokeObjectURL(url);
 
     // Send completion message
     chrome.runtime.sendMessage({
       action: 'downloadComplete',
-      folderName: folderName
+      folderName: cleanTitle
     });
 
   } catch (error) {
