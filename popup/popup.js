@@ -124,7 +124,7 @@ document.addEventListener('DOMContentLoaded', async function() {
               // Fallback to constructed URL
               return {
                 title: decodeURIComponent(showName).replace(/-/g, ' ')
-                  .replace(/\b\w/g, l.toUpperCase()),
+                  .replace(/\b\w/g, letter => letter.toUpperCase()),
                 manifestUrl: `https://ruv-vod.akamaized.net/${videoId}/master.m3u8`,
                 success: true
               };
