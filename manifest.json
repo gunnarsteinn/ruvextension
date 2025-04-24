@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "RÚV Downloader",
+  "version": "1.0",
+  "description": "Download videos from RÚV",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "storage",
+    "webRequest",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*.ruv.is/*",
+    "*://*.akamaized.net/*"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html"
+  },
+  "background": {
+    "service_worker": "background/background.js"
+  }
+}

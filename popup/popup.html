@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+  <title>RÚV Downloader</title>
+</head>
+<body>
+  <div class="container">
+    <h2>📽️ RÚV Downloader</h2>
+    <div id="video-info">
+      <p id="title"><span class="emoji">🎥</span><span class="text">Loading video...</span></p>
+      <p id="duration"><span class="emoji">⭐</span><span class="text">Ready to download!</span></p>
+    </div>
+    <div class="controls">
+      <select id="quality">
+        <option value="Normal">💿 Normal Quality</option>
+        <option value="HD720">📺 HD 720p</option>
+        <option value="HD1080" selected>🎦 HD 1080p</option>
+      </select>
+      <button id="download">
+        <span class="emoji">⚡</span>
+        <span>Download Video</span>
+      </button>
+    </div>
+    <div id="status"></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
