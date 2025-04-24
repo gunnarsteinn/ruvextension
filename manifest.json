@@ -12,7 +12,8 @@
   ],
   "host_permissions": [
     "*://*.ruv.is/*",
-    "*://*.akamaized.net/*"
+    "*://*.akamaized.net/*",
+    "*://api.ruv.is/*"
   ],
   "action": {
     "default_popup": "popup/popup.html"

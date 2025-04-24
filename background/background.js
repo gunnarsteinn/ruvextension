@@ -26,20 +26,96 @@ async function handleVideoDownload({ videoData, quality, title }) {
       throw new Error('No manifest URL found');
     }
 
-    // Get the base URL for segment downloads
-    const baseUrl = videoData.manifestUrl.substring(0, videoData.manifestUrl.lastIndexOf('/') + 1);
-    console.log('Base URL:', baseUrl);
-
-    // Headers for RÚV requests
+    // Headers required for RÚV's CDN
     const headers = {
       'Origin': 'https://www.ruv.is',
       'Referer': 'https://www.ruv.is/',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9,is;q=0.8',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'cross-site',
+      'Connection': 'keep-alive',
+      'Authorization': `Bearer ${await getAuthToken()}`
     };
 
-    let masterResponse = await fetch(videoData.manifestUrl, { headers });
+    // Try to fetch the master playlist
+    let masterResponse = await fetch(videoData.manifestUrl, { 
+      headers,
+      credentials: 'omit'
+    });
+
+    // If original URL fails, try quality variants
     if (!masterResponse.ok) {
-      throw new Error(`Failed to fetch master playlist: ${masterResponse.status}`);
+      console.log('Original manifest URL failed, trying quality variants...');
+      const videoId = videoData.manifestUrl.match(/\/([^\/]+)\/master\.m3u8$/)?.[1] ||
+                     videoData.manifestUrl.match(/\/([^\/]+)$/)?.[1];
+      
+      if (videoId) {
+        // Try to get stream URL from API first
+        try {
+          const apiResponse = await fetch(`https://www.ruv.is/api/manual/programs/${videoId}`, {
+            headers: {
+              'Accept': 'application/json',
+              'Origin': 'https://www.ruv.is',
+              'Referer': 'https://www.ruv.is/'
+            }
+          });
+          
+          if (apiResponse.ok) {
+            const data = await apiResponse.json();
+            if (data.file) {
+              masterResponse = await fetch(data.file, { headers, credentials: 'omit' });
+              if (masterResponse.ok) {
+                videoData.manifestUrl = data.file;
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Error fetching from API:', e);
+        }
+
+        // If API fails, try quality variants
+        if (!masterResponse.ok) {
+          const qualityMap = {
+            'HD1080': '3600',
+            'HD720': '2400',
+            'Normal': '1200'
+          };
+
+          // Try the requested quality first
+          const preferredQuality = qualityMap[quality] || '3600';
+          const qualityVariants = [
+            `https://ruv-vod.akamaized.net/${videoId}/${preferredQuality}/master.m3u8`,
+            ...Object.values(qualityMap)
+              .filter(q => q !== preferredQuality)
+              .map(q => `https://ruv-vod.akamaized.net/${videoId}/${q}/master.m3u8`)
+          ];
+
+          for (const variantUrl of qualityVariants) {
+            console.log('Trying quality variant:', variantUrl);
+            try {
+              masterResponse = await fetch(variantUrl, { 
+                headers,
+                credentials: 'omit'
+              });
+              
+              if (masterResponse.ok) {
+                console.log('Found working quality variant:', variantUrl);
+                videoData.manifestUrl = variantUrl;
+                break;
+              }
+            } catch (e) {
+              console.log('Failed to fetch variant:', variantUrl, e);
+            }
+          }
+        }
+      }
+
+      if (!masterResponse.ok) {
+        throw new Error(`Failed to fetch master playlist: ${masterResponse.status}`);
+      }
     }
 
     const masterPlaylist = await masterResponse.text();
@@ -51,7 +127,7 @@ async function handleVideoDownload({ videoData, quality, title }) {
     console.log('Selected variant URL:', variantUrl);
 
     // Fetch the variant playlist
-    const variantResponse = await fetch(variantUrl, { headers });
+    const variantResponse = await fetch(variantUrl, { headers, credentials: 'omit' });
     if (!variantResponse.ok) {
       throw new Error(`Failed to fetch variant playlist: ${variantResponse.status}`);
     }
@@ -83,7 +159,10 @@ async function handleVideoDownload({ videoData, quality, title }) {
       const segment = segments[i];
       const segmentUrl = segmentBaseUrl + segment.uri;
       
-      const response = await fetch(segmentUrl, { headers });
+      const response = await fetch(segmentUrl, { 
+        headers,
+        credentials: 'omit'
+      });
       if (!response.ok) {
         throw new Error(`Failed to fetch segment ${i}: ${response.status}`);
       }
@@ -124,6 +203,26 @@ async function handleVideoDownload({ videoData, quality, title }) {
     console.error('Download error:', error);
     throw error;
   }
+}
+
+async function getAuthToken() {
+  try {
+    const response = await fetch('https://www.ruv.is/api/auth/ruvid/token', {
+      headers: {
+        'Accept': 'application/json',
+        'Origin': 'https://www.ruv.is',
+        'Referer': 'https://www.ruv.is/'
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      return data.token;
+    }
+  } catch (e) {
+    console.error('Error getting auth token:', e);
+  }
+  return '';
 }
 
 function parseM3U8Segments(playlist) {
@@ -201,16 +300,42 @@ async function getBestQualityVariant(masterPlaylist, baseUrl, preferredQuality) 
 
 function getAlternativeManifestUrl(originalUrl) {
   try {
-    // Extract the file ID if present
-    const fileMatch = originalUrl.match(/ruv-vod\.akamaized\.net\/([^\/]+)/);
-    if (fileMatch) {
-      const fileId = fileMatch[1];
-      // Try different quality variations
-      const qualities = ['1200', '2400', '3600'];
-      return `https://ruv-vod.akamaized.net/${fileId}/${qualities[2]}/index.m3u8`;
+    // Extract video ID from various URL patterns
+    let videoId;
+    
+    // Try to extract from full URL
+    const patterns = [
+      /ruv-vod\.akamaized\.net\/([^\/]+)/,
+      /\/sjonvarp\/spila\/[^\/]+\/\d+\/([a-zA-Z0-9]+)/,
+      /\/krakkaruv\/spila\/[^\/]+\/\d+\/([a-zA-Z0-9]+)/
+    ];
+
+    for (const pattern of patterns) {
+      const match = originalUrl.match(pattern);
+      if (match && match[1]) {
+        videoId = match[1];
+        break;
+      }
+    }
+
+    if (videoId) {
+      // Try different URL formats
+      const urlFormats = [
+        `https://ruv-vod.akamaized.net/${videoId}/master.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/index.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/3600/master.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/3600/index.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/2400/master.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/2400/index.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/1200/master.m3u8`,
+        `https://ruv-vod.akamaized.net/${videoId}/1200/index.m3u8`
+      ];
+
+      // Return all possible URLs to try
+      return urlFormats;
     }
   } catch (e) {
-    console.error('Error generating alternative URL:', e);
+    console.error('Error generating alternative URLs:', e);
   }
   return null;
 }
